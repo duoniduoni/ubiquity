@@ -1,9 +1,5 @@
 # If you are curious why partman-auto is so slow, it is because
 # update-all is slow
-# kylin set autopartition scheme, swap
-kobeswap=''
-# end kylin
-
 update_all () {
 	local dev num id size type fs path name partitions
 	for dev in $DEVICES/*; do
@@ -43,6 +39,19 @@ find_method () {
 	echo "$found"
 }
 
+cap_ram () {
+    local ram
+    ram="$1"
+    db_get partman-auto/cap-ram
+    # test that return string is all numbers, otherwise do not cap
+    if [ $(expr "x$RET" : "x[0-9]*$") -gt 1 ]; then
+	if [ $ram -gt "$RET" ]; then
+	    ram=$RET
+	fi
+    fi
+    echo "$ram"
+}
+
 unnamed=0
 
 decode_recipe () {
@@ -67,6 +76,7 @@ decode_recipe () {
 		ram=$(grep ^MemTotal: /proc/meminfo | { read x y z; echo $y; })000
 	fi
 	ram=$(convert_to_megabytes $ram)
+	ram=$(cap_ram $ram)
 	name="Unnamed.${unnamed}"
 	scheme=''
 	line=''
@@ -137,19 +147,6 @@ decode_recipe () {
 				;;
 			esac
 			shift; shift; shift; shift
-			# kylin set autopartition scheme, swap
-                        #kylin swap <= 64GB
-                        if [ "$fs" = "linux-swap" ];then
-                                tmpstr=$(echo "$max" | grep -v "^[0-9][0-9]*$")
-                                if [ -z "$tmpstr" ];then
-                                        if [ "$max" -gt 65536 ];then
-                                                min=65536
-                                                max=$min
-                                                factor=80000
-                                        fi
-                                        factor=80000
-                                fi
-                        fi
 			line="$min $factor $max $fs $*"
 
 			# Exclude partitions that have ...ignore set
@@ -192,11 +189,6 @@ decode_recipe () {
 			fi
 
 			scheme="${scheme:+$scheme$NL}$line"
-			# kobe
-			echo "$line" | grep -q " linux-swap"
-			if [ $? -eq 0 ]; then
-				kobeswap="$line"
-			fi
 			line=''
 			;;
 		    *)
@@ -204,107 +196,6 @@ decode_recipe () {
 			;;
 		esac
 	done
-
-	# kylin set autopartition scheme
-	# Whether  backup and data is selected
-	kdata=''
-        kbackup=''
-	kfile="/tmp/kylin-data.ini"
-	if [ -e "$kfile" ]; then
-		kdata=$(grep ^data $kfile | { read y; echo $y; })
-		kdata=`echo $kdata | cut -d \= -f 2`
-		kdata=$(echo $kdata)
-		kbackup=$(grep ^backup $kfile | { read x; echo $x; })
-		kbackup=`echo $kbackup | cut -d \= -f 2`
-		kbackup=$(echo $kbackup)
-	fi
-    
-    # lvm 模式 free_size 没有传过来，设置默认值
-	kylin_free_size=${free_size:=120000}
-	myscheme=''
-	#set /boot partition size
-	line=''
-	line="1024 80000 1024 ext4 \$primary{ } \$bootable{ } method{ format } format{ } use_filesystem{ } filesystem{ ext4 } mountpoint{ /boot }"
-	myscheme="${myscheme:+$myscheme$NL}$line"
-
-        #/backup and /
-	#set /backup and root  partitions size
-        if [ "$kbackup" = "1" ]; then
-		###backup size : 10% free_size
-		backup_size=$(($kylin_free_size / 10 ))
-		### < 15GB
-		if [ $backup_size -lt 15360 ]; then
-			backup_size=15360
-		
-		elif [ $backup_size -gt 102400 ]; then
-			backup_size=102400
-		fi
-			
-                if [ "$kdata" = "1" ]; then
-			# has data partition, then root and backup partition size is fixed
-                        line=''
-			line="15360 80000 102400 ext4 \$lvmok{ } method{ format } format{ } use_filesystem{ } \$default_filesystem{ } mountpoint{ / }"
-                        myscheme="${myscheme:+$myscheme$NL}$line"
-
-                        line=''
-                        line="15360 80000 $backup_size ext4 \$lvmok{ } method{ format } format{ } use_filesystem{ } \$default_filesystem{ } mountpoint{ /backup }"
-                        myscheme="${myscheme:+$myscheme$NL}$line"
-                else
-			# no has data partition, then backup partition size is fixed, root partition is max
-                        line=''
-			line="15360 80000 -1 ext4 \$lvmok{ } method{ format } format{ } use_filesystem{ } \$default_filesystem{ } mountpoint{ / }"
-                        myscheme="${myscheme:+$myscheme$NL}$line"
-
-                        line=''
-                        line="15360 80000 $backup_size ext4 \$lvmok{ } method{ format } format{ } use_filesystem{ } \$default_filesystem{ } mountpoint{ /backup }"
-                        myscheme="${myscheme:+$myscheme$NL}$line"
-                fi
-        else
-		# no backup partition
-                if [ "$kdata" = "1" ]; then
-			# has data partition, then root partition size is fixed, data partition is max
-                        line=''
-                        line="15360 80000 102400 ext4 \$lvmok{ } method{ format } format{ } use_filesystem{ } \$default_filesystem{ } mountpoint{ / }"
-                        myscheme="${myscheme:+$myscheme$NL}$line"
-                else
-			# no data partition, then root partition is max
-                        line=''
-                        line="15360 80000 -1 ext4 \$lvmok{ } method{ format } format{ } use_filesystem{ } \$default_filesystem{ } mountpoint{ / }"
-                        myscheme="${myscheme:+$myscheme$NL}$line"
-                fi
-        fi
-
-        #/data
-	# set /data partition size
-        if [ "$kdata" = "1" ]; then
-                line=''
-                line="100 80000 -1 ext4 \$lvmok{ } method{ format } format{ } use_filesystem{ } \$default_filesystem{ } mountpoint{ /data }"
-                myscheme="${myscheme:+$myscheme$NL}$line"
-        fi
-
-        #swap
-	# set swap partition size
-        if  [ -n "$kobeswap" ];then
-                line=''
-                line="$kobeswap"
-                myscheme="${myscheme:+$myscheme$NL}$line"
-        fi
-
-        #/efi
-	# if bios is uefi mode, then set efi partition size
-        kyarch="$(archdetect)"
-        case $kyarch in
-                */efi)
-                        line=''
-                        line="512 80000 512 fat32 method{ efi } format{ }"
-                        myscheme="${myscheme:+$myscheme$NL}$line"
-                        ;;
-        esac
-
-	line=''
-	scheme=''
-	scheme="$myscheme"
-	myscheme=''
 }
 
 foreach_partition () {
