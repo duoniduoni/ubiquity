@@ -1,0 +1,225 @@
+#! /bin/sh
+# Check that the root filesystem is large enough to hold /rofs.
+. /lib/partman/lib/base.sh
+
+db_get partman-auto/method
+if [ "$RET" = loop ]; then
+	# Wubi does some of its own checks which help defend against this,
+	# and the delay imposed by this check looks particularly weird in
+	# Wubi.
+	exit 0
+fi
+
+# Fudge factors
+rootfudge=200000000 # 200MB
+# kylin add, just Double space reserved
+bootmultfudge=2
+# kylin end
+
+partitions=
+rofssum=0
+rootrofssize=
+rootsize=
+# kylin add, Used to determine the partition number and size of root partition and boot partition
+kyrootsize=0
+kybootsize=0
+kyrootnum=0
+kybootnum=0
+kybackupsize=0
+# kylin end
+
+parts=$(
+for dev in $DEVICES/*; do
+    [ -d "$dev" ] || continue
+    cd $dev
+    open_dialog PARTITIONS
+    while { read_line num id size type fs path name; [ "$id" ]; }; do
+	[ "$fs" != free ] || continue
+	[ -f "$id/method" ] || continue
+	[ -f "$id/acting_filesystem" ] || continue
+        [ -f "$id/mountpoint" ] || continue
+        mountpoint="$(cat "$id/mountpoint")"
+	echo "$mountpoint,$size,$num"
+    done
+    close_dialog
+done | sort
+)
+
+seen=
+for part in $parts; do
+	mountpoint="$(echo $part | cut -d ',' -f1)"
+	size="$(echo $part | cut -d ',' -f2)"
+	partnum="$(echo $part | cut -d ',' -f3)"
+	if [ "$mountpoint" = "/" ]; then
+		if [ -e /cdrom/casper/filesystem.size ]; then
+			rofssize="$(cat /cdrom/casper/filesystem.size)"
+		else
+			rofssize="$(du -s --block-size=1 /rofs | cut -f1)"
+		fi
+		rootrofssize="$rofssize"
+		rootsize="$size"
+		# get root partition num and size
+		kyrootsize="$size"
+		kyrootnum="$partnum"
+	else
+		# get boot partition num and size
+		if [ "$mountpoint" = "/boot" ]; then
+			kybootsize="$size"
+			kybootnum="$partnum"
+		fi
+
+		# get backup partition num and size
+		if [ "$mountpoint" = "/backup" ]; then
+			kybackupsize="$size"
+		fi
+
+		[ -d "/rofs$mountpoint" ] || continue
+		rofssize="$(du -s --block-size=1 /rofs$mountpoint | cut -f1)"
+		if [ "$mountpoint" = "/boot" ]; then
+			rofssize="$(expr $rofssize \* $bootmultfudge)"
+		else
+			# general fudge factor: add 20% for luck
+			rofssize="$(expr $rofssize \* 12 / 10)"
+		fi
+		if ! longint_le $rofssize $size ; then
+			partitions="${partitions:+$partitions, }$mountpoint $(longint2human $rofssize)"
+		fi
+
+		# Make sure that no parent of $mountpoint has been added to
+		# $rofssum yet, otherwise we'll produce an invalid size.
+		d="$(dirname $mountpoint)"
+		found=
+		if [ -n "$seen" ]; then
+			while :; do
+				if [ "$d" = / ]; then
+					break
+				fi
+				if echo "$seen" | grep -wqs "$d"; then
+					found=1
+					break
+				fi
+				d="$(dirname $d)"
+			done
+		fi
+		if [ -z "$found" ]; then
+			rofssum="$(expr $rofssum + $rofssize)"
+			seen="$seen $mountpoint"
+		fi
+	fi
+done
+
+#kylin add
+# the boot must be first partition, and size >= 900MB
+# the root must be second partition, and size >= 15GB
+ARCH="$(archdetect)"
+case $ARCH in
+	arm64/*)
+		if [ $kybootsize -eq 0 ];then
+			db_capb align
+			db_input critical ubiquity/kylin_boot_error_nofind || true
+			db_go || true
+			db_capb backup align
+			exit 1
+		fi
+
+		if longint_le $kybootsize 900000000; then
+			db_capb align
+			db_input critical ubiquity/kylin_boot_error_small || true
+			db_go || true
+			db_capb backup align
+			exit 1
+		fi
+
+		if [ $kyrootsize -eq 0 ];then
+			db_capb align
+			db_input critical ubiquity/kylin_root_error_nofind || true
+			db_go || true
+			db_capb backup align
+			exit 1
+		fi
+
+		if longint_le $kyrootsize 15000000000; then
+			db_capb align
+			db_input critical ubiquity/kylin_root_error_small || true
+			db_go || true
+			db_capb backup align
+			exit 1
+		fi
+
+		### kylin add, the first partition of boot in ft1500 and mips
+		cpu_name=`cat /proc/cpuinfo | grep '^model name.*FT.1500' | head -1`
+		cpu_part=`cat /proc/cpuinfo | grep '^CPU part.*0x660' | head -1`
+		if [ -n "$cpu_name" ] && [ -n "$cpu_part" ]; then
+			if [ "$kybootnum" != "1" ]; then
+				db_capb align
+				db_input critical ubiquity/kylin_boot_error_num || true
+				db_go || true
+				db_capb backup align
+				exit 1
+			fi
+
+			if [ "$kyrootnum" != "2" ]; then
+				db_capb align
+				db_input critical ubiquity/kylin_root_error_num || true
+				db_go || true
+				db_capb backup align
+				exit 1
+			fi
+		fi
+		;;
+	mips.*/*)
+		if [ "$kybootnum" != "1" ]; then
+			db_capb align
+			db_input critical ubiquity/kylin_boot_error_num || true
+			db_go || true
+			db_capb backup align
+			exit 1
+		fi
+esac
+
+# if has backup partition, then 15GB < backup_size < 100GB
+if [ $kybackupsize -ne 0 ]; then
+    ### < 15GB	
+    if longint_le $kybackupsize 15000000000; then
+        db_input critical ubiquity/kylin_backup_small || true
+        db_go || true
+        db_get ubiquity/kylin_backup_small
+        if [ "$RET" = true ]; then
+                exit 1
+        fi
+    fi
+    ### > 100GB
+    if longint_ge $kybackupsize 110000000000; then
+        db_input critical ubiquity/kylin_backup_larger || true
+        db_go || true
+        db_get ubiquity/kylin_backup_larger
+        if [ "$RET" = true ]; then
+                exit 1
+        fi
+    fi
+fi
+
+#kylin add end
+
+if [ -n "$rootrofssize" ]; then
+    rofs=$(expr $rootrofssize - $rofssum + $rootfudge)
+    if ! longint_le $rofs $rootsize ; then
+        partitions="/ $(longint2human $rofs)${partitions:+, $partitions}"
+    fi
+fi
+
+if [ -n "$partitions" ]; then
+    partitions="$(echo "$partitions" | sed -e 's/, /\n/g')"
+    db_capb escape
+    db_reset ubiquity/partition-too-small
+    db_subst ubiquity/partition-too-small PARTITIONS "$(printf %s "$partitions" | debconf-escape -e)"
+    db_capb
+    db_input critical ubiquity/partition-too-small || true
+    db_go || true
+    db_get ubiquity/partition-too-small
+    if [ "$RET" = true ]; then
+        exit 1
+    fi
+fi
+
+exit 0

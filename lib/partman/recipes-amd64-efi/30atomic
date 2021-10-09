@@ -1,0 +1,30 @@
+partman-auto/text/atomic_scheme ::
+
+538 538 1075 fat32
+	$iflabel{ gpt }
+	$reusemethod{ }
+	method{ efi }
+	format{ } .
+
+512 10000 512 ext4
+	$primary{ }
+	$bootable{ }
+	method{ format }
+	format{ }
+	use_filesystem{ }
+	filesystem{ ext4 }
+	mountpoint{ /boot } .
+
+1024 10000 -1 $default_filesystem
+	$primary{ }
+	method{ format }
+	format{ }
+	use_filesystem{ }
+	$default_filesystem{ }
+	mountpoint{ / } .
+
+200% 512 200% linux-swap
+	$lvmok{ }
+	$reusemethod{ }
+	method{ swap }
+	format{ } .

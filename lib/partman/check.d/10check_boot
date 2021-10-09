@@ -1,0 +1,33 @@
+#!/bin/sh
+# Check if boot partition gets mounted on /boot, added by kobe
+
+. /lib/partman/lib/base.sh
+
+for dev in $DEVICES/*; do
+	[ -d "$dev" ] || continue
+	cd $dev
+	open_dialog PARTITIONS
+	while { read_line num id size type fs path name; [ "$id" ]; }; do
+		[ "$fs" != free ] || continue
+		[ -f $id/method ] || continue
+		[ -f $id/acting_filesystem ] || continue
+		[ -f $id/mountpoint ] || continue
+		mountpoint=$(cat $id/mountpoint)
+		filesystem=$(cat $id/acting_filesystem)
+		if [ "$mountpoint" = /boot ]; then
+			boot_path=$path
+		fi
+	done
+	close_dialog
+done
+
+if [ -z "$boot_path" ]; then
+	# The boot file system is essential
+	db_set partman-basicfilesystems/boot_not_found true
+	db_input critical partman-basicfilesystems/boot_not_found || true
+	db_go || true
+	db_get partman-basicfilesystems/boot_not_found
+	if [ "$RET" = true ]; then
+		exit 1
+	fi
+fi

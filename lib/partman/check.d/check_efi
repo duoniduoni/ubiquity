@@ -1,0 +1,56 @@
+#!/bin/sh
+# check efi partition, Is need? or the size is:  500MB  <= efi 
+
+. /lib/partman/lib/base.sh
+
+ARCH="$(archdetect)"
+case $ARCH in
+    i386/*)
+        exit 0
+        ;;
+    amd64/*)
+        exit 0
+        ;;
+esac
+
+efi_path=
+efi_num=
+efi_size=
+for dev in $DEVICES/*; do
+        [ -d $dev ] || continue
+        cd $dev
+        open_dialog PARTITIONS
+        while { read_line num id size type fs path name; [ "$id" ]; }; do
+                [ $fs != free ] || continue
+                [ -f "$id/method" ] || continue
+                method=$(cat $id/method)
+                [ "$method" = efi ] || continue
+                if [ -z "$efi_path" ]; then
+                        efi_path="$path"
+                        efi_num="$num"
+                        efi_size="$size"
+                fi
+        done
+        close_dialog
+done
+
+if [ -z "$efi_path" ]; then
+	db_input critical partman-basicfilesystems/no_kyefi || true
+	db_go || true
+	db_get partman-basicfilesystems/no_kyefi
+	if [ "$RET" = true ]; then
+		exit 1
+	fi
+fi
+
+if longint_le "$efi_size" 500000000; then
+        db_capb align
+        db_input critical partman-basicfilesystems/too_small_kyefi || true
+        db_go || true
+        db_capb backup align
+        exit 1
+fi
+
+# ky_device=`echo "$efi_path" | sed "s/[0-9]//g"`
+# parted $ky_device set $efi_num esp on
+# parted $ky_device set $efi_num boot on

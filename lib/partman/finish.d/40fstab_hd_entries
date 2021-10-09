@@ -1,0 +1,140 @@
+#!/bin/sh
+
+. /usr/share/debconf/confmodule
+
+[ -f /target/etc/fstab ] || exit 0
+
+OS=$(udpkg --print-os)
+# kylin add
+# get is server os or desktop os
+serverStatus="`dpkg -l | awk '/^ii/ {print $2}' | grep kylin-server-guide | head -n1`"
+# get select lang
+ky_lang="`cat /tmp/kylin_ubiquity_config | sed 's/ //g' | grep '^lang=' | sed 's/lang=//g'`"
+# kylin end
+
+escape () {
+	printf %s "$1" | \
+		sed 's/\\/\\134/g; s/ /\\040/g; s/	/\\011/g; s/\n/\\012/g'
+}
+
+# dev, mountpoint, type, options, dump, pass
+addfstab () {
+	printf "%-15s %-15s %-7s %-15s %-7s %s\n" \
+		"$(escape "$1")" "$(escape "$2")" \
+		"$(escape "$3")" "$(escape "$4")" \
+		"$5" "$6"
+}
+
+db_get partman/mount_style
+style="$RET"
+
+# kylin add, this for yhkylin-backup-tools
+echo "SNAPSHOT_ENABLED=0" > /target/etc/.bootinfo
+# kylin end
+fstab=$(
+	for i in /lib/partman/fstab.d/*; do
+		[ -x "$i" ] || continue
+		$i
+	done |
+	while read fs mp type options dump pass; do
+		echo $mp $fs $type $options $dump $pass
+	done |
+	sort |
+	while read mp fs type options dump pass; do
+                # kylin add, for system partition set disk label
+                if [ "$mp" = "/data" ]; then
+                        if [ "$ky_lang" = "zh" ] || [ "$ky_lang" = "zh_CN" ];then
+                            tune2fs -L "数据盘" $fs >/dev/null 2>&1
+                        else
+                            tune2fs -L "DATA" $fs >/dev/null 2>&1
+                        fi
+                fi
+                if [ "$mp" = "/" ] && [ ! -z "$serverStatus" ]; then
+                        tune2fs -L "SYSROOT" $fs >/dev/null 2>&1
+                fi
+                if [ "$mp" = "/boot" ] && [ ! -z "$serverStatus" ]; then
+                        tune2fs -L "SYSBOOT" $fs >/dev/null 2>&1
+                fi
+                if [ "$mp" = "/backup" ]; then
+                        # kylin for backup tools
+                        tune2fs -L "KYLIN-BACKUP" $fs >/dev/null 2>&1
+                        backup_uuid="$(block-attr --uuid $fs)" >/dev/null 2>&1
+                        echo "RECOVERY_DEV_UUID=$backup_uuid" > /target/etc/.bootinfo
+                        echo "SNAPSHOT_ENABLED=1" >> /target/etc/.bootinfo
+                        # mkdir -p /target/etc/udev/rules.d
+                        # kydevice=`basename $fs`
+                        # echo "KERNEL==\"$kydevice\",ENV{UDISKS_IGNORE}=\"1\"" >> /target/etc/udev/rules.d/10-local.rules
+                        mkdir -p /target/backup/current
+                        mkdir -p /target/backup/snapshots
+                        # continue
+                fi
+                # kylin end, for system partition set disk label
+		case "$fs" in
+		    (/dev/disk/*|/dev/fd[0-9]*|/dev/mapper/*)
+            # kylin add, can not mount backup partition
+			if [ "$mp" = /backup ]; then
+				options="noauto"
+				dump="0"
+				pass="0"
+			fi
+            # kylin end, can not mount backup partition
+            # kylin add, set data partition mount args
+            if [ "$mp" = /data ]; then
+                    options="rw,user,x-gvfs-show,nosuid,nofail"
+            fi
+
+			addfstab "$(mapdevfs $fs)" "$mp" "$type" "$options" "$dump" "$pass"
+			;;
+		    (/*)
+			dev="/var/lib/partman/devices/$(echo "$fs" | sed 's:/:=:g')"
+			if [ -f "$dev/loop" ]; then
+				loop="$(cat "$dev/loop")"
+				if [ "$options" = defaults ]; then
+					options=loop
+				else
+					options="loop,$options"
+				fi
+				addfstab "$loop" "$mp" "$type" "$options" "$dump" "$pass"
+			else
+				case "$mp" in
+				    (/*)	desc="$mp" ;;
+				    (*)		desc="$type" ;;
+				esac
+				if [ "$style" = label ] && \
+				   label="$(block-attr --label $fs)" && \
+				   [ "$label" ]; then
+					printf "# %s was on %s during installation\n" "$desc" "$(mapdevfs $fs)"
+					addfstab "LABEL=$label" "$mp" "$type" "$options" "$dump" "$pass"
+				elif ([ "$style" = label ] || [ "$style" = uuid ]) && \
+				     uuid="$(block-attr --uuid $fs)" && \
+				     [ "$uuid" ]; then
+					printf "# %s was on %s during installation\n" "$desc" "$(mapdevfs $fs)"
+                    # kylin add, set data partition mount args
+                    if [ "$mp" = /data ]; then
+                            options="rw,user,x-gvfs-show,nosuid,nofail"
+                    fi
+                    # kylin add, can not mount backup partition
+					if [ "$mp" = /backup ]; then
+						options="noauto"
+						dump="0"
+						pass="0"
+					fi
+					addfstab "UUID=$uuid" "$mp" "$type" "$options" "$dump" "$pass"
+				else
+					addfstab "$(mapdevfs $fs)" "$mp" "$type" "$options" "$dump" "$pass"
+				fi
+			fi
+			;;
+		    ([a-zA-Z]*/ROOT/*)
+			if [ "$type" = "zfs" -a "$mp" != "/" ]; then
+			     # This is definitely a ZFS, it's not the root fs (which is auto mounted
+			     # in the initrd).
+			     addfstab "$fs" "$mp" "$type" "$options" "$dump" "$pass"
+			fi
+			;;
+		esac
+	done
+)
+
+echo "$fstab" >>/target/etc/fstab
+# chattr +i /target/etc/.bootinfo
