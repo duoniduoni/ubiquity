@@ -380,6 +380,8 @@ class BaseFrontend:
         return self.reboot_after_install
 
     def get_reboot_seen(self):
+        #fucking life 
+        #return False
         reboot_seen = 'false'
         try:
             reboot_seen = self.debconf_operation(
@@ -399,6 +401,8 @@ class BaseFrontend:
         return self.shutdown_after_install
 
     def get_shutdown_seen(self):
+        #fucking life 
+        #return False
         shutdown_seen = 'false'
         try:
             shutdown_seen = self.debconf_operation(
