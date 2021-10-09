@@ -21,16 +21,15 @@
 
 from __future__ import print_function
 
-import fcntl
 import gzip
+import io
+import itertools
 import os
 import platform
 import pwd
 import re
 import shutil
-import socket
 import stat
-import struct
 import subprocess
 import sys
 import syslog
@@ -38,22 +37,13 @@ import textwrap
 import traceback
 
 import apt_pkg
-from apt.cache import Cache
+from apt.cache import Cache, FetchFailedException
 import debconf
 
 sys.path.insert(0, '/usr/lib/ubiquity')
 
 from ubiquity import install_misc, misc, osextras, plugin_manager
 from ubiquity.components import apt_setup, check_kernels, hw_detect
-
-
-INTERFACES_TEXT = """\
-# This file describes the network interfaces available on your system
-# and how to activate them. For more information, see interfaces(5).
-
-# The loopback network interface
-auto lo
-iface lo inet loopback"""
 
 
 HOSTS_TEXT = """\
@@ -66,12 +56,6 @@ ff02::1 ip6-allnodes
 ff02::2 ip6-allrouters"""
 
 
-IFTAB_TEXT = """\
-# This file assigns persistent names to network interfaces.
-# See iftab(5) for syntax.
-"""
-
-
 def cleanup_after(func):
     def wrapper(self):
         try:
@@ -82,7 +66,7 @@ def cleanup_after(func):
                 self.db.progress('STOP')
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except:
+            except Exception:
                 pass
     return wrapper
 
@@ -105,9 +89,13 @@ class Install(install_misc.InstallBase):
     def __init__(self):
         install_misc.InstallBase.__init__(self)
 
-        self.db = debconf.Debconf()
+        self.db = debconf.Debconf(
+            read=io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8'),
+            write=io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8'))
+
         self.kernel_version = platform.release()
         self.arch_version = platform.machine()
+        self.re_kernel_version = re.compile(r'^linux-image-\d.*')
 
         # Get langpacks from install
         self.langpacks = []
@@ -190,11 +178,10 @@ class Install(install_misc.InstallBase):
         self.db.progress(
             'START', self.start, self.end, 'ubiquity/install/title')
 
-        # the ghost mode, just need to set bootload
         if os.path.isfile("/tmp/.kylin_ghost"):
             self.next_region()
             self.db.progress('INFO', 'ubiquity/install/bootloader')
-            if self.arch_version != "aarch64" and self.arch_version != "mips64" and self.arch_version != "mips64el":
+            if self.arch_version != "mips64" and self.arch_version != "mips64el":
                 self.kylin_ghost_grub()
                 self.configure_bootloader()
 
@@ -218,7 +205,6 @@ class Install(install_misc.InstallBase):
 
         self.next_region()
         self.db.progress('INFO', 'ubiquity/install/apt')
-        #kylin, just keep cdrom in apt
         self.configure_apt()
 
         self.configure_plugins()
@@ -228,14 +214,16 @@ class Install(install_misc.InstallBase):
 
         self.next_region(size=5)
         # Ignore failures from language pack installation.
-#        try:
-#            self.install_language_packs()
-#        except install_misc.InstallStepError:
-#            pass
-#        except IOError:
-#            pass
-#        except SystemError:
-#            pass
+# kylin hide
+#         try:
+#             self.install_language_packs()
+#         except install_misc.InstallStepError:
+#             pass
+#         except IOError:
+#             pass
+#         except SystemError:
+#             pass
+# kylin end
 
         self.next_region()
         self.remove_unusable_kernels()
@@ -251,14 +239,20 @@ class Install(install_misc.InstallBase):
         self.next_region()
         self.db.progress('INFO', 'ubiquity/install/installing')
 
-#        if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
-#            self.install_oem_extras()
-#        else:
-#            self.install_extras()
+# kylin hide
+#         if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
+#             self.install_oem_extras()
+#         else:
+#             self.install_extras()
+# kylin end
+
+        # Configure zsys
+        self.configure_zsys()
 
         self.next_region()
         self.db.progress('INFO', 'ubiquity/install/bootloader')
-        if self.arch_version != "aarch64" and self.arch_version != "mips64" and self.arch_version != "mips64el":
+        self.copy_mok()
+        if self.arch_version != "mips64" and self.arch_version != "mips64el":
             self.configure_bootloader()
 
         self.next_region(size=4)
@@ -273,13 +267,15 @@ class Install(install_misc.InstallBase):
             self.remove_extras()
 
         self.next_region()
-#        if 'UBIQUITY_OEM_USER_CONFIG' not in os.environ:
-#            self.install_restricted_extras()
+# kylin hide
+#         if 'UBIQUITY_OEM_USER_CONFIG' not in os.environ:
+#             self.install_restricted_extras()
+# kylin end
 
         self.db.progress('INFO', 'ubiquity/install/apt_clone_restore')
         try:
             self.apt_clone_restore()
-        except:
+        except Exception:
             syslog.syslog(
                 syslog.LOG_WARNING,
                 'Could not restore packages from the previous install:')
@@ -289,7 +285,7 @@ class Install(install_misc.InstallBase):
             self.db.go()
         try:
             self.copy_network_config()
-        except:
+        except Exception:
             syslog.syslog(
                 syslog.LOG_WARNING,
                 'Could not copy the network configuration:')
@@ -299,7 +295,7 @@ class Install(install_misc.InstallBase):
             self.db.go()
         try:
             self.copy_bluetooth_config()
-        except:
+        except Exception:
             syslog.syslog(
                 syslog.LOG_WARNING,
                 'Could not copy the bluetooth configuration:')
@@ -309,14 +305,14 @@ class Install(install_misc.InstallBase):
             self.db.go()
         try:
             self.recache_apparmor()
-        except:
+        except Exception:
             syslog.syslog(
                 syslog.LOG_WARNING, 'Could not create an Apparmor cache:')
             for line in traceback.format_exc().split('\n'):
                 syslog.syslog(syslog.LOG_WARNING, line)
         try:
             self.copy_wallpaper_cache()
-        except:
+        except Exception:
             syslog.syslog(
                 syslog.LOG_WARNING, 'Could not copy wallpaper cache:')
             for line in traceback.format_exc().split('\n'):
@@ -326,34 +322,11 @@ class Install(install_misc.InstallBase):
         self.db.progress('SET', self.count)
         self.db.progress('INFO', 'ubiquity/install/log_files')
         self.copy_logs()
-        # kylin add, do kylin post actions
+        # kylin add post actions
         self.kylinpostaction()
         os.system("cp -f /var/log/syslog /target/var/log/installer/syslog")
-        # kylin end, do kylin post actions
+        # kylin end
         self.save_random_seed()
-
-        #kybackup
-        import configparser
-        factory_backup = "0"
-        filename = '/tmp/kylin-data.ini'
-        if os.path.isfile(filename):
-            ky_cf = configparser.ConfigParser()
-            ky_cf.read(filename)
-            if ky_cf.has_section("lixiang"):
-                if ky_cf.has_option("lixiang", "backup-factory"):
-                    factory_backup = ky_cf.get("lixiang", "backup-factory")
-
-        if factory_backup == "1":
-            misc.execute_root("umount", "/target/backup")
-            (kystatus, kyoutput) = subprocess.getstatusoutput("/usr/bin/backup-auto --autobackup /target /backup")
-            kyfactory_backup_log = open('/tmp/.kyfactory_backup', 'w')
-            if kystatus == 0:
-                kyfactory_backup_log.write('success')
-            else:
-                kyfactory_backup_log.write('failed')
-            kyfactory_backup_log.close()
-            open('/target/var/log/kybackup-installer', 'w').write(kyoutput)
-            open('/var/log/kybackup-installer', 'w').write(kyoutput)
 
         self.db.progress('SET', self.end)
 
@@ -384,12 +357,12 @@ class Install(install_misc.InstallBase):
         cache = Cache()
 
         # Python standard library.
-        re_minimal = re.compile('^python\d+\.\d+-minimal$')
+        re_minimal = re.compile(r'^python\d+\.\d+-minimal$')
         python_installed = sorted([
             pkg[:-8] for pkg in cache.keys()
             if re_minimal.match(pkg) and cache[pkg].is_installed])
         for python in python_installed:
-            re_file = re.compile('^/usr/lib/%s/.*\.py$' % python)
+            re_file = re.compile(r'^/usr/lib/%s/.*\.py$' % python)
             files = [
                 f for f in cache['%s-minimal' % python].installed_files
                 if (re_file.match(f) and
@@ -497,12 +470,6 @@ class Install(install_misc.InstallBase):
                         os.symlink(linkto, targetpath)
                     else:
                         shutil.copy2(path, targetpath)
-        else:
-            if not os.path.exists('/etc/network/interfaces'):
-                # Make sure there's at least something here so that ifupdown
-                # doesn't get upset at boot.
-                with open('/etc/network/interfaces', 'w') as interfaces:
-                    print(INTERFACES_TEXT, file=interfaces)
 
         try:
             hostname = self.db.get('netcfg/get_hostname')
@@ -538,50 +505,6 @@ class Install(install_misc.InstallBase):
             if self.target != '/':
                 shutil.copy2(
                     persistent_net, self.target_file(persistent_net[1:]))
-        else:
-            # TODO cjwatson 2006-03-30: from <bits/ioctls.h>; ugh, but no
-            # binding available
-            SIOCGIFHWADDR = 0x8927
-            # <net/if_arp.h>
-            ARPHRD_ETHER = 1
-
-            if_names = {}
-            sock = socket.socket(socket.SOCK_DGRAM)
-            interfaces = install_misc.get_all_interfaces()
-            for i in range(len(interfaces)):
-                if_names[interfaces[i]] = struct.unpack(
-                    'H6s', fcntl.ioctl(
-                        sock.fileno(), SIOCGIFHWADDR,
-                        struct.pack('256s', interfaces[i].encode()))[16:24])
-            sock.close()
-
-            with open(self.target_file('etc/iftab'), 'w') as iftab:
-                print(IFTAB_TEXT, file=iftab)
-
-                for i in range(len(interfaces)):
-                    dup = False
-
-                    if_name = if_names[interfaces[i]]
-                    if if_name is None or if_name[0] != ARPHRD_ETHER:
-                        continue
-
-                    for j in range(len(interfaces)):
-                        if i == j or if_names[interfaces[j]] is None:
-                            continue
-                        if if_name[1] != if_names[interfaces[j]][1]:
-                            continue
-
-                        if if_names[interfaces[j]][0] == ARPHRD_ETHER:
-                            dup = True
-
-                    if dup:
-                        continue
-
-                    line = (interfaces[i] + " mac " +
-                            ':'.join(['%02x' % if_name[1][c]
-                                      for c in range(6)]))
-                    line += " arp %d" % if_name[0]
-                    print(line, file=iftab)
 
     def run_plugin(self, plugin):
         """Run a single install plugin."""
@@ -593,6 +516,7 @@ class Install(install_misc.InstallBase):
         if ret:
             raise install_misc.InstallStepError(
                 "Plugin %s failed with code %s" % (plugin.NAME, ret))
+            syslog.syslog("fucking life : Plugin %s failed with code %s" % (plugin.NAME, ret))
 
     def configure_locale(self):
         """Configure the locale by running the language plugin.
@@ -614,10 +538,14 @@ class Install(install_misc.InstallBase):
 
     def configure_plugins(self):
         """Apply plugin settings to installed system."""
+
+        syslog.syslog("fucking life : install plugins here ~ version 0x01")
         for plugin in self.plugins:
-            # if go oem mode, then not need run usersetup post set
-            if os.path.isfile("/tmp/.kylin_reboot_go_oem") and plugin.NAME == "usersetup":
+            syslog.syslog("\t fucking will install plugin %s" % plugin.NAME)
+            if os.path.isfile("/tmp/.kylin_reboot_go_oem") and plugin.NAME == "usersetup":   
                 continue
+
+            syslog.syslog("\tfucking begin run install plugin %s" % plugin.NAME)
             self.run_plugin(plugin)
 
     def configure_apt(self):
@@ -625,11 +553,11 @@ class Install(install_misc.InstallBase):
         if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
             return  # apt will already be setup as the OEM wants
 
-        # kylin add if has no cdrom pool , then no need config apt
+        ### kylin add
         if not os.path.isdir("/cdrom/dists") or not os.path.isdir("/cdrom/pool"):
             syslog.syslog("kylin not has a cdrom poool!")
             return
-        # kylin end
+        ### kylin end
 
         # TODO cjwatson 2007-07-06: Much of the following is
         # cloned-and-hacked from base-installer/debian/postinst. Perhaps we
@@ -705,13 +633,12 @@ class Install(install_misc.InstallBase):
         except OSError:
             pass
 
-        # kylin fix , just config cdrom sourcelist
+        ### kylin add
 #        dbfilter = apt_setup.AptSetup(None, self.db)
 #        ret = dbfilter.run_command(auto_process=True)
 #        if ret != 0:
 #            raise install_misc.InstallStepError(
 #                "AptSetup failed with code %d" % ret)
-
         try:
             syslog.syslog("kylin apt add cdrom...")
             install_misc.chrex(self.target, 'rm', '-rf', '/etc/apt/sources.list')
@@ -720,6 +647,7 @@ class Install(install_misc.InstallBase):
             install_misc.chrex(self.target, 'apt-cdrom', 'add')
         except:
             syslog.syslog("kylin apt add cdrom error!")
+        ### kylin end
 
     def run_target_config_hooks(self):
         """Run hook scripts from /usr/lib/ubiquity/target-config.
@@ -750,12 +678,12 @@ class Install(install_misc.InstallBase):
                 self.db.progress('STEP', 1)
             self.db.progress('STOP')
 
-#    def install_language_packs(self):
-#        if not self.langpacks:
-#            return
-#
-#        self.do_install(self.langpacks, langpacks=True)
-#        self.verify_language_packs()
+#     def install_language_packs(self):
+#         if not self.langpacks:
+#             return
+# 
+#         self.do_install(self.langpacks, langpacks=True)
+#         self.verify_language_packs()
 
     def verify_language_packs(self):
         if os.path.exists('/var/lib/ubiquity/no-install-langpacks'):
@@ -803,7 +731,7 @@ class Install(install_misc.InstallBase):
             return None
         for dep in dependencies:
             name = dep[0].target_pkg.name
-            if name.startswith('linux-image-2.'):
+            if self.re_kernel_version.match(name):
                 return name
             elif name.startswith('linux-'):
                 return self.traverse_for_kernel(cache, name)
@@ -840,7 +768,7 @@ class Install(install_misc.InstallBase):
                     if kernel.startswith('linux-image-2.'):
                         new_kernel_pkg = kernel
                         new_kernel_version = kernel[12:]
-                    elif kernel.startswith('linux-generic-'):
+                    elif kernel.startswith('linux-'):
                         # Traverse dependencies to find the real kernel image.
                         cache = Cache()
                         kernel = self.traverse_for_kernel(cache, kernel)
@@ -883,32 +811,11 @@ class Install(install_misc.InstallBase):
         try:
             if remove_kernels:
                 install_misc.record_removed(remove_kernels, recursive=True)
-        except:
+        except Exception:
             self.db.progress('STOP')
             raise
         self.db.progress('SET', 5)
         self.db.progress('STOP')
-
-    def get_resume_partition(self):
-        biggest_size = 0
-        biggest_partition = None
-        try:
-            with open('/proc/swaps') as swaps:
-                for line in swaps:
-                    words = line.split()
-                    if words[1] != 'partition':
-                        continue
-                    if not os.path.exists(words[0]):
-                        continue
-                    if words[0].startswith('/dev/ramzswap'):
-                        continue
-                    size = int(words[2])
-                    if size > biggest_size:
-                        biggest_size = size
-                        biggest_partition = words[0]
-        except Exception:
-            return None
-        return biggest_partition
 
     def configure_hardware(self):
         """Reconfigure several hardware-specific packages.
@@ -936,29 +843,6 @@ class Install(install_misc.InstallBase):
         if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
             script += '-oem'
         misc.execute(script)
-
-        resume = self.get_resume_partition()
-        if resume is not None:
-            resume_uuid = None
-            try:
-                resume_uuid = subprocess.Popen(
-                    ['block-attr', '--uuid', resume],
-                    stdout=subprocess.PIPE,
-                    universal_newlines=True).communicate()[0].rstrip('\n')
-            except OSError:
-                pass
-            if resume_uuid:
-                resume = "UUID=%s" % resume_uuid
-            if os.path.exists(self.target_file('etc/initramfs-tools/conf.d')):
-                configdir = self.target_file('etc/initramfs-tools/conf.d')
-            elif os.path.exists(self.target_file('etc/mkinitramfs/conf.d')):
-                configdir = self.target_file('etc/mkinitramfs/conf.d')
-            else:
-                configdir = None
-            if configdir is not None:
-                resume_path = os.path.join(configdir, 'resume')
-                with open(resume_path, 'w') as configfile:
-                    print("RESUME=%s" % resume, file=configfile)
 
         osextras.unlink_force(self.target_file('etc/popularity-contest.conf'))
         try:
@@ -1004,10 +888,6 @@ class Install(install_misc.InstallBase):
                     'libpaper1',
                     'ssl-cert']
         arch, subarch = install_misc.archdetect()
-
-        # this postinst installs EFI application and cleans old entries
-        if arch in ('amd64', 'i386') and subarch == 'efi':
-            packages.append('fwupdate')
 
         try:
             for package in packages:
@@ -1085,14 +965,15 @@ class Install(install_misc.InstallBase):
 
         inst_boot = self.db.get('ubiquity/install_bootloader')
         if inst_boot == 'true' and 'UBIQUITY_NO_BOOTLOADER' not in os.environ:
-            binds = ("/proc", "/sys", "/dev", "/run")
+            binds = ("/proc", "/sys", "/dev", "/run",
+                     "/sys/firmware/efi/efivars")
             for bind in binds:
                 misc.execute('mount', '--bind', bind, self.target + bind)
 
             arch, subarch = install_misc.archdetect()
 
             try:
-                if arch in ('amd64', 'i386'):
+                if arch in ('amd64', 'arm64', 'i386'):
                     from ubiquity.components import grubinstaller
                     while 1:
                         dbfilter = grubinstaller.GrubInstaller(None, self.db)
@@ -1117,21 +998,6 @@ class Install(install_misc.InstallBase):
                                 self.db.set('grub-installer/bootdev', response)
                         else:
                             break
-                elif (arch in ('armel', 'armhf') and
-                      subarch in ('omap', 'omap4', 'mx5')):
-                    from ubiquity.components import flash_kernel
-                    dbfilter = flash_kernel.FlashKernel(None, self.db)
-                    ret = dbfilter.run_command(auto_process=True)
-                    if ret != 0:
-                        raise install_misc.InstallStepError(
-                            "FlashKernel failed with code %d" % ret)
-                elif arch == 'powerpc':
-                    from ubiquity.components import yabootinstaller
-                    dbfilter = yabootinstaller.YabootInstaller(None, self.db)
-                    ret = dbfilter.run_command(auto_process=True)
-                    if ret != 0:
-                        raise install_misc.InstallStepError(
-                            "YabootInstaller failed with code %d" % ret)
                 else:
                     raise install_misc.InstallStepError(
                         "No bootloader installer found")
@@ -1141,6 +1007,37 @@ class Install(install_misc.InstallBase):
 
             for bind in binds:
                 misc.execute('umount', '-f', self.target + bind)
+
+    def configure_zsys(self):
+        """ Configure zsys """
+        use_zfs = self.db.get('ubiquity/use_zfs')
+        if use_zfs:
+            misc.execute_root('/usr/share/ubiquity/zsys-setup', 'finalize')
+
+    def copy_mok(self):
+        if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
+            return
+        try:
+            if self.db.get('oem-config/enable') == 'true':
+                return
+        except debconf.DebconfError:
+            pass
+
+        source = "/var/lib/shim-signed/mok/"
+        target = "/target/var/lib/shim-signed/mok/"
+
+        if not os.path.exists(source):
+            return
+
+        os.makedirs(target, exist_ok=True)
+        for mok_file in os.listdir(source):
+            source_file = os.path.join(source, mok_file)
+            target_file = os.path.join(target, mok_file)
+
+            if os.path.exists(target_file):
+                continue
+
+            shutil.copy(source_file, target_file)
 
     def do_remove(self, to_remove, recursive=False):
         self.nested_progress_start()
@@ -1164,6 +1061,12 @@ class Install(install_misc.InstallBase):
 
         with cache.actiongroup():
             install_misc.get_remove_list(cache, to_remove, recursive)
+
+        with cache.actiongroup():
+            for cachedpkg in cache:
+                if cachedpkg.is_auto_removable and not cachedpkg.marked_delete:
+                    syslog.syslog("Autopurge %s" % cachedpkg.name)
+                    cachedpkg.mark_delete(auto_fix=False, purge=True)
 
         self.db.progress('SET', 1)
         self.progress_region(1, 5)
@@ -1195,6 +1098,10 @@ class Install(install_misc.InstallBase):
         if commit_error or cache._depcache.broken_count > 0:
             if commit_error is None:
                 commit_error = ''
+
+            syslog.syslog('fucking life : skip error 2')
+            return 
+
             brokenpkgs = install_misc.broken_packages(cache)
             syslog.syslog('broken packages after removal: '
                           '%s' % ', '.join(brokenpkgs))
@@ -1296,11 +1203,14 @@ class Install(install_misc.InstallBase):
         if inst_langpacks:
             self.verify_language_packs()
 
-#    def install_restricted_extras(self):
-#        if self.db.get('ubiquity/use_nonfree') == 'true':
-#            self.db.progress('INFO', 'ubiquity/install/nonfree')
-#            packages = self.db.get('ubiquity/nonfree_package').split()
-#            self.do_install(packages)
+#     def install_restricted_extras(self):
+#         packages = []
+#         if self.db.get('ubiquity/use_nonfree') == 'true':
+#             self.db.progress('INFO', 'ubiquity/install/nonfree')
+#             packages.extend(self.db.get('ubiquity/nonfree_package').split())
+#         # also install recorded non-free packages
+#         packages.extend(install_misc.query_recorded_installed())
+#         self.do_install(packages)
 
     def install_extras(self):
         """Try to install packages requested by installer components."""
@@ -1317,7 +1227,48 @@ class Install(install_misc.InstallBase):
         if not found_cdrom:
             os.rename("%s.apt-setup" % sources_list, sources_list)
 
-        self.do_install(install_misc.query_recorded_installed())
+        # this will install free & non-free things, but not things
+        # that have multiarch Depends or Recommends. Instead, those
+        # will be installed by install_restricted_extras() later
+        # because this function runs before i386 foreign arch is
+        # enabled
+        cache = Cache()
+        filtered_extra_packages = install_misc.query_recorded_installed()
+        for package in filtered_extra_packages.copy():
+            pkg = cache.get(package)
+            if not pkg:
+                continue
+            candidate = pkg.candidate
+            dependencies = candidate.dependencies + candidate.recommends
+            all_deps = itertools.chain.from_iterable(dependencies)
+            for dep in all_deps:
+                if ':' in dep.name:
+                    filtered_extra_packages.remove(package)
+                    break
+
+        self.do_install(filtered_extra_packages)
+
+        if self.db.get('ubiquity/install_oem') == 'true':
+            try:
+                # If we installed any OEM metapackages, we should try to update /
+                # upgrade them to their versions in the OEM archive.
+                with open('/run/ubuntu-drivers-oem.autoinstall', 'r') as f:
+                    oem_pkgs = set(f.read().splitlines())
+                    for oem_pkg in oem_pkgs.copy():
+                        target_sources_list = self.target_file("etc/apt/sources.list.d/{}.list".format(oem_pkg))
+                        if not os.path.exists(target_sources_list):
+                            continue
+
+                        try:
+                            cache.update(sources_list=target_sources_list)
+                            cache.open()
+                        except FetchFailedException:
+                            syslog.syslog("Failed to apt update {}".format(target_sources_list))
+                            oem_pkgs.discard(oem_pkg)
+                    if oem_pkgs:
+                        self.do_install(oem_pkgs)
+            except FileNotFoundError:
+                pass
 
         if found_cdrom:
             os.rename("%s.apt-setup" % sources_list, sources_list)
@@ -1347,7 +1298,24 @@ class Install(install_misc.InstallBase):
                                 '-o', 'oem', '-g', 'oem',
                                 '/%s' % desktop_file,
                                 '/home/oem/Desktop/%s' % desktop_base)
+                            install_misc.chrex(
+                                self.target,
+                                'sudo', '-i', '-u', 'oem',
+                                'dbus-run-session', '--',
+                                'gio', 'set',
+                                '/home/oem/Desktop/%s' % desktop_base,
+                                'metadata::trusted', 'true')
                             break
+
+                    # Disable gnome-initial-setup for the OEM user
+                    install_misc.chrex(
+                        self.target, 'install', '-d',
+                        '-o', 'oem', '-g', 'oem',
+                        '/home/oem/.config')
+                    install_misc.chrex(
+                        self.target,
+                        'sudo', '-i', '-u', 'oem',
+                        'touch', '/home/oem/.config/gnome-initial-setup-done')
 
                 # Carry the locale setting over to the installed system.
                 # This mimics the behavior in 01oem-config-udeb.
@@ -1497,7 +1465,6 @@ class Install(install_misc.InstallBase):
             difference = set()
             with open(manifest_remove) as manifest_file:
                 for line in manifest_file:
-                    # kylin add, in oem mode, can not delete casper and ubiquity
                     if os.path.isfile("/tmp/.kylin_reboot_go_oem"):
                         if (line.strip() != '' and not line.startswith('#') and not line.startswith('ubiquity') and 
                                 not line.startswith('casper') and not line.startswith('oem-config')):
@@ -1531,14 +1498,25 @@ class Install(install_misc.InstallBase):
         else:
             difference = set()
 
+        # Add minimal installation package list if selected
+        if self.db.get('ubiquity/minimal_install') == 'true':
+            if os.path.exists(install_misc.minimal_install_rlist_path):
+                rm = set()
+                with open(install_misc.minimal_install_rlist_path) as m_file:
+                    rm = {line.strip().split(':')[0] for line in m_file}
+                difference |= rm
+
         # Keep packages we explicitly installed.
         keep = install_misc.query_recorded_installed()
 
         arch, subarch = install_misc.archdetect()
 
-        if arch in ('amd64', 'i386'):
-            for pkg in ('grub', 'grub-pc', 'grub-efi', 'grub-efi-amd64',
-                        'mokutil', 'lilo'):
+        if arch in ('amd64', 'arm64', 'i386'):
+            for pkg in ('grub', 'grub-efi', 'grub-efi-amd64',
+                        'grub-efi-arm64', 'grub-efi-arm64-signed',
+                        'flash-kernel', 'aarch64-laptops-support',
+                        'grub-efi-amd64-signed', 'shim-signed', 'mokutil',
+                        'lilo'):
                 if pkg not in keep:
                     difference.add(pkg)
 
@@ -1560,7 +1538,8 @@ class Install(install_misc.InstallBase):
             cache = self.restricted_cache
             for pkg in cache.keys():
                 if (cache[pkg].is_installed and
-                        cache[pkg].section.startswith('restricted/')):
+                        cache[pkg].candidate.section.startswith(
+                            'restricted/')):
                     difference.add(pkg)
             del cache
 
@@ -1733,11 +1712,10 @@ class Install(install_misc.InstallBase):
         if os.path.exists(dcd):
             shutil.copy(dcd, self.target_file('var/lib/ubuntu_dist_channel'))
 
-    # x86 ghost mode install , just config bootload
+### kylin add
     def kylin_ghost_grub(self):
         subprocess.call(['log-output', '-t', 'kylin-postactions-ghost-grub', '/bin/bash', '/usr/share/ubiquity/kylin-postactions-ghost-x86-grub.sh'])
 
-    # common ghost mode install, set post actions
     def kylinpostaction_ghost(self):
         target_dir = self.target_file('etc')
         if not os.path.exists(target_dir):
@@ -1746,8 +1724,13 @@ class Install(install_misc.InstallBase):
         subprocess.call(['log-output', '-t', 'kylin-postactions-ghost', '/bin/bash', '/usr/share/ubiquity/kylin-postactions-ghost.sh'])
         #end kylin
 
-    # common mode install, set post actions
     def kylinpostaction(self):
+        if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
+            syslog.syslog("fucking life : ##### in oem , skip kylinpostaction #####") 
+            return 
+
+        syslog.syslog("fucking life : ******* kylinpostaction ********")
+
         binds = ("/proc", "/sys", "/dev", "/run")
         for bind in binds:
             misc.execute('mount', '--bind', bind, self.target + bind)
@@ -1756,7 +1739,6 @@ class Install(install_misc.InstallBase):
         if not os.path.exists(target_dir):
             os.makedirs(target_dir)
 
-        # copy kylin license file in new os
         for kyfile in ('/cdrom/.kyinfo', '/cdrom/LICENSE'):
             target_kyfile = os.path.join(target_dir,
                                            os.path.basename(kyfile))
@@ -1771,7 +1753,7 @@ class Install(install_misc.InstallBase):
         # kylin copy QC
         qcDir = '/cdrom/QC/'
         if os.path.exists(qcDir):
-            os.system("/usr/bin/rsync -a /cdrom/QC/ /target/usr/share/oem-test/")
+            os.system("/bin/cp -r /cdrom/QC/* /target/usr/share/oem-test/")
         # end kylin
 
         #kylin do postactions in /usr/share/ubiquity/kylin-postactions.sh
@@ -1792,7 +1774,7 @@ class Install(install_misc.InstallBase):
 
         for bind in binds:
             misc.execute('umount', '-f', self.target + bind)
-
+### kylin end
 
     def copy_logs(self):
         """Copy log files to the installed system."""
