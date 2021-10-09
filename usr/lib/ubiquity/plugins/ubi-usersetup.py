@@ -28,21 +28,27 @@ from __future__ import print_function
 
 import os
 import re
-import debconf
-from ubiquity import misc, plugin, validation
-# edit by kobe
-import ubiquity.tz
 
+import debconf
+
+from ubiquity import misc, plugin, validation
+# kylin add
+import ubiquity.tz
+# kylin end
 
 NAME = 'usersetup'
-WEIGHT = 10
+# kylin add
+#AFTER = 'timezone'
+#AFTER = 'partman'
 # if oem, then only show this page
 if os.path.isfile("/tmp/.kylin_oem_running"):
-    AFTER = 'welcome'
+    AFTER = 'language'
     INSTALL = False
 else:
     # AFTER = 'partman'
     AFTER = 'isoem'
+# kylin end
+WEIGHT = 10
 
 
 def check_hostname(hostname):
@@ -62,17 +68,8 @@ def check_hostname(hostname):
 
 def check_username(username):
     """Returns a list of reasons why the username is invalid."""
-    # add 　Restrictions on user names
     if username:
-        if len(username) < 1 or len(username) > 32:
-            return ['username_error_length']
-        elif re.match('_', username[0]):
-            return ['username_error_underscores']
-        elif re.match('[0-9]', username[0]):
-            return ['username_error_digits']
-        elif re.search('[A-Z]', username):
-            return ['username_error_capital']
-        elif not re.match('[a-z]', username[0]):
+        if not re.match('[a-z]', username[0]):
             return ['username_error_badfirstchar']
         # Technically both these conditions might hold.  However, the common
         # case seems to be that somebody starts typing their name beginning
@@ -81,15 +78,6 @@ def check_username(username):
         elif not re.match('^[-a-z0-9_]+$', username):
             return ['username_error_badchar']
     return []
-
-# added by kobe
-def check_password(password):
-    if len(password) < 6:
-        return -1
-    elif password.isdigit() or password.isalpha():
-        return -2
-    else:
-        return 0
 
 
 def make_error_string(controller, errors):
@@ -141,18 +129,6 @@ class PageBase(plugin.PluginUI):
         """Returns true if the user should be automatically logged in."""
         raise NotImplementedError('get_auto_login')
 
-    def set_encrypt_home(self, value):
-        """Set whether the home directory should be encrypted."""
-        raise NotImplementedError('set_encrypt_home')
-
-    def set_force_encrypt_home(self, value):
-        """Forces whether the home directory should be encrypted."""
-        raise NotImplementedError('set_force_encrypt_home')
-
-    def get_encrypt_home(self):
-        """Returns true if the home directory should be encrypted."""
-        raise NotImplementedError('get_encrypt_home')
-
     def username_error(self, msg):
         """The selected username was bad."""
         raise NotImplementedError('username_error')
@@ -185,10 +161,12 @@ class PageBase(plugin.PluginUI):
     def plugin_skip_page(self):
         if os.path.isfile("/tmp/.kylin_ghost"):
             return True
-        elif os.path.isfile("/tmp/.kylin_reboot_go_oem"):
-            return True
+        #fucking life
+        #elif os.path.isfile("/tmp/.kylin_reboot_go_oem"):
+        #    return True
         else:
             return False
+
 
 class PageGtk(PageBase):
     plugin_title = 'ubiquity/text/userinfo_heading_label'
@@ -197,8 +175,6 @@ class PageGtk(PageBase):
         from gi.repository import Gio, Gtk
 
         PageBase.__init__(self, *args, **kwargs)
-        self.page = None
-        return
         ### kylin ghost install
         if os.path.isfile("/tmp/.kylin_ghost"):
             self.page = None
@@ -215,9 +191,6 @@ class PageGtk(PageBase):
         self.username_edited = False
         self.hostname_edited = False
         self.hostname_timeout_id = 0
-        # added by kobe
-        # self.password_changed_id = None
-        # self.password_edited = False
 
         builder = Gtk.Builder()
         self.controller.add_builder(builder)
@@ -227,13 +200,10 @@ class PageGtk(PageBase):
         self.page = builder.get_object('stepUserInfo')
         self.username = builder.get_object('username')
         self.hostname = builder.get_object('hostname')
-        #self.fullname = builder.get_object('fullname')
+        self.fullname = builder.get_object('fullname')
         self.password = builder.get_object('password')
         self.verified_password = builder.get_object('verified_password')
         self.login_auto = builder.get_object('login_auto')
-        self.login_encrypt = builder.get_object('login_encrypt')
-        # kobe
-        self.login_encrypt.hide()
         self.login_pass = builder.get_object('login_pass')
         self.username_error_label = builder.get_object('username_error_label')
         self.hostname_error_label = builder.get_object('hostname_error_label')
@@ -242,7 +212,7 @@ class PageGtk(PageBase):
 
         self.username_ok = builder.get_object('username_ok')
         self.hostname_ok = builder.get_object('hostname_ok')
-        #self.fullname_ok = builder.get_object('fullname_ok')
+        self.fullname_ok = builder.get_object('fullname_ok')
         self.password_ok = builder.get_object('password_ok')
         self.password1_ok = builder.get_object('password1_ok')
         self.password_strength = builder.get_object('password_strength')
@@ -264,14 +234,11 @@ class PageGtk(PageBase):
             'changed', self.on_username_changed)
         self.hostname_changed_id = self.hostname.connect(
             'changed', self.on_hostname_changed)
-        # added by kobe
-        # self.password_changed_id = self.password.connect(
-        #    'changed', self.on_password_changed)
 
         if self.controller.oem_config:
-            #self.fullname.set_text('OEM Configuration (temporary user)')
-            #self.fullname.set_editable(False)
-            #self.fullname.set_sensitive(False)
+            self.fullname.set_text('OEM Configuration (temporary user)')
+            self.fullname.set_editable(False)
+            self.fullname.set_sensitive(False)
             self.username.set_text('oem')
             self.username.set_editable(False)
             self.username.set_sensitive(False)
@@ -312,15 +279,6 @@ class PageGtk(PageBase):
     def get_auto_login(self):
         return self.login_auto.get_active()
 
-    def set_encrypt_home(self, value):
-        self.login_encrypt.set_active(value)
-
-    def set_force_encrypt_home(self, value):
-        self.login_vbox.set_sensitive(not value)
-
-    def get_encrypt_home(self):
-        return self.login_encrypt.get_active()
-
     def username_error(self, msg):
         self.username_ok.hide()
         m = '<small><span foreground="darkred"><b>%s</b></span></small>' % msg
@@ -359,11 +317,6 @@ class PageGtk(PageBase):
         if (self.username_changed_id is None or
                 self.hostname_changed_id is None):
             return
-        # added by kobe
-        # if (self.username_changed_id is None or
-        #        self.hostname_changed_id is None or
-        #        self.password_changed_id is None):
-        #    return
 
         if (widget is not None and widget.get_name() == 'fullname' and
                 not self.username_edited):
@@ -382,22 +335,16 @@ class PageGtk(PageBase):
             if t:
                 self.hostname.set_text(re.sub(r'\W', '', t) + self.suffix)
             self.hostname.handler_unblock(self.hostname_changed_id)
-        # elif (widget is not None and widget.get_name() == 'password' and
-        #      not self.password_edited):
-        #    self.password.handler_block(self.password_changed_id)
-        #    pw = widget.get_text()
-        #    self.password.set_text(pw)
-        #    self.password.handler_unblock(self.password_changed_id)
 
         # Do some initial validation.  We have to process all the widgets so we
         # can know if we can really show the next button.  Otherwise we'd show
         # it on any field being valid.
         complete = True
 
-        #if self.fullname.get_text():
-        #    self.fullname_ok.show()
-        #else:
-        #    self.fullname_ok.hide()
+        if self.fullname.get_text():
+            self.fullname_ok.show()
+        else:
+            self.fullname_ok.hide()
 
         text = self.username.get_text()
         if text:
@@ -425,13 +372,13 @@ class PageGtk(PageBase):
         )
 
         # kylin fix 15994, only when the password meets the requirements can be verified
-        passwd1_ok_visible = False
+        password_ok_visible = False
         if self.password1_ok.get_visible():
-            passwd1_ok_visible = True
+            password_ok_visible = True
         else:
-            passwd1_ok_visible = False
-        self.verified_password.set_editable(passwd1_ok_visible)
-        self.verified_password.set_sensitive(passwd1_ok_visible)
+            password_ok_visible = False
+        self.verified_password.set_editable(password_ok_visible)
+        self.verified_password.set_sensitive(password_ok_visible)
         # kylin end
 
         complete = complete and password_ok
@@ -452,29 +399,6 @@ class PageGtk(PageBase):
             self.hostname_ok.hide()
             self.hostname_error_label.hide()
 
-        # added by kobe
-        #pwtxt = self.password.get_text()
-        #if pwtxt:
-        #    errors = check_password(pwtxt)
-        #    if errors == -1:
-        #        self.password_error('length < 6')
-        #        complete = False
-        #        #m = '<small><span foreground="darkred"><b>%s</b></span></small>' % msg
-        #        #self.password_strength.set_markup(m)
-        #        self.password_strength.set_markup('<small><span color="red">密码长度不够6位</span></small>')
-        #        self.password_strength.show()
-        #    elif errors == -2:
-        #        self.password_error('all is num or alpah')
-        #        complete = False
-        #        self.password_strength.set_markup('<small><span color="red">密码全为数字或全为字母</span></small>')
-        #        self.password_strength.show()
-        #    else:
-        #        self.password_strength.set_markup('<small><span color="darkgreen">Strong password</span></small>')
-        #        self.password_strength.show()
-        #else:
-        #    complete = False
-        #    self.password_strength.hide()
-
         self.controller.allow_go_forward(complete)
 
     def on_username_changed(self, widget):
@@ -491,10 +415,6 @@ class PageGtk(PageBase):
             self.hostname_timeout_id = GLib.timeout_add(
                 300, self.hostname_timeout, widget)
 
-    # added by kobe
-    # def on_password_changed(self, widget):
-    #    self.password_edited = (widget.get_text() != '')
-
     def lookup_result(self, resolver, result, unused):
         from gi.repository import GLib
         try:
@@ -503,9 +423,7 @@ class PageGtk(PageBase):
             pass
         else:
             # FIXME: i18n
-            errors = []
-            errors.append('hostname_exists')
-            self.hostname_error(make_error_string(self.controller, errors))
+            self.hostname_error('That name already exists on the network.')
             self.hostname_ok.hide()
 
     def hostname_timeout(self, widget):
@@ -531,14 +449,6 @@ class PageGtk(PageBase):
         else:
             self.resolver_ok = False
 
-    def on_authentication_toggled(self, w):
-        if w == self.login_auto and w.get_active():
-            self.login_encrypt.set_active(False)
-        elif w == self.login_encrypt and w.get_active():
-            # TODO why is this so slow to activate the login_pass radio button
-            # when checking encrypted home?
-            self.login_pass.set_active(True)
-
 
 class PageKde(PageBase):
     plugin_breadcrumb = 'ubiquity/text/breadcrumb_user'
@@ -547,8 +457,8 @@ class PageKde(PageBase):
         PageBase.__init__(self, *args, **kwargs)
         self.controller = controller
 
-        from PyQt4 import uic
-        from PyQt4.QtGui import QPixmap
+        from PyQt5 import uic
+        from PyQt5.QtGui import QPixmap
 
         self.plugin_widgets = uic.loadUi(
             '/usr/share/ubiquity/qt/stepUserSetup.ui')
@@ -558,15 +468,14 @@ class PageKde(PageBase):
         self.hostname_edited = False
 
         if self.controller.oem_config:
-            #self.page.fullname.setText('OEM Configuration (temporary user)')
-            #self.page.fullname.setReadOnly(True)
-            #self.page.fullname.setEnabled(False)
+            self.page.fullname.setText('OEM Configuration (temporary user)')
+            self.page.fullname.setReadOnly(True)
+            self.page.fullname.setEnabled(False)
             self.page.username.setText('oem')
             self.page.username.setReadOnly(True)
             self.page.username.setEnabled(False)
             self.page.login_pass.hide()
             self.page.login_auto.hide()
-            self.page.login_encrypt.hide()
             self.username_edited = True
             self.hostname_edited = True
 
@@ -577,21 +486,19 @@ class PageKde(PageBase):
 
         warningIcon = QPixmap(
             "/usr/share/icons/oxygen/48x48/status/dialog-warning.png")
-        #self.page.fullname_error_image.setPixmap(warningIcon)
+        self.page.fullname_error_image.setPixmap(warningIcon)
         self.page.username_error_image.setPixmap(warningIcon)
         self.page.password_error_image.setPixmap(warningIcon)
         self.page.hostname_error_image.setPixmap(warningIcon)
 
         self.clear_errors()
 
-        #self.page.fullname.textChanged[str].connect(self.on_fullname_changed)
+        self.page.fullname.textChanged[str].connect(self.on_fullname_changed)
         self.page.username.textChanged[str].connect(self.on_username_changed)
         self.page.hostname.textChanged[str].connect(self.on_hostname_changed)
         # self.page.password.textChanged[str].connect(self.on_password_changed)
         # self.page.verified_password.textChanged[str].connect(
         #    self.on_verified_password_changed)
-        self.page.login_pass.clicked[bool].connect(self.on_login_pass_clicked)
-        self.page.login_auto.clicked[bool].connect(self.on_login_auto_clicked)
 
         self.page.password_debug_warning_label.setVisible(
             'UBIQUITY_DEBUG' in os.environ)
@@ -650,24 +557,6 @@ class PageKde(PageBase):
     def get_auto_login(self):
         return self.page.login_auto.isChecked()
 
-    def on_login_pass_clicked(self, checked):
-        self.page.login_encrypt.setEnabled(checked)
-
-    def on_login_auto_clicked(self, checked):
-        self.page.login_encrypt.setChecked(not(checked))
-        self.page.login_encrypt.setEnabled(not(checked))
-
-    def set_encrypt_home(self, value):
-        self.page.login_encrypt.setChecked(value)
-
-    def set_force_encrypt_home(self, value):
-        self.page.login_encrypt.setDisabled(value)
-        self.page.login_auto.setDisabled(value)
-        self.page.login_pass.setDisabled(value)
-
-    def get_encrypt_home(self):
-        return self.page.login_encrypt.isChecked()
-
     def username_error(self, msg):
         self.page.username_error_reason.setText(msg)
         self.page.username_error_image.show()
@@ -690,7 +579,7 @@ class PageKde(PageBase):
         self.page.hostname.setText(value)
 
     def clear_errors(self):
-        #self.page.fullname_error_image.hide()
+        self.page.fullname_error_image.hide()
         self.page.username_error_image.hide()
         self.page.password_error_image.hide()
         self.page.hostname_error_image.hide()
@@ -753,15 +642,6 @@ class PageNoninteractive(PageBase):
     def get_auto_login(self):
         return self.auto_login
 
-    def set_encrypt_home(self, value):
-        self.encrypt_home = value
-
-    def set_force_encrypt_home(self, value):
-        self.set_encrypt_home(value)
-
-    def get_encrypt_home(self):
-        return self.encrypt_home
-
     def username_error(self, msg):
         """The selected username was bad."""
         print('\nusername error: %s' % msg, file=self.console)
@@ -789,9 +669,9 @@ class PageNoninteractive(PageBase):
 
 class Page(plugin.Plugin):
     def prepare(self, unfiltered=False):
-        # edit by kobe
+        # kylin add
         self.tzdb = ubiquity.tz.Database()
-
+        # kylin end
         if ('UBIQUITY_FRONTEND' not in os.environ or
                 os.environ['UBIQUITY_FRONTEND'] != 'debconf_ui'):
             self.preseed_bool('user-setup/allow-password-weak', True)
@@ -809,13 +689,13 @@ class Page(plugin.Plugin):
                             self.ui.set_hostname(hostname)
                 except debconf.DebconfError:
                     pass
-            #if self.ui.get_fullname() == '':
-            #    try:
-            #        fullname = self.db.get('passwd/user-fullname')
-            #        if fullname != '':
-            #            self.ui.set_fullname(fullname)
-            #    except debconf.DebconfError:
-            #        pass
+            if self.ui.get_fullname() == '':
+                try:
+                    fullname = self.db.get('passwd/user-fullname')
+                    if fullname != '':
+                        self.ui.set_fullname(fullname)
+                except debconf.DebconfError:
+                    pass
             if self.ui.get_username() == '':
                 try:
                     username = self.db.get('passwd/username')
@@ -826,14 +706,6 @@ class Page(plugin.Plugin):
             try:
                 auto_login = self.db.get('passwd/auto-login')
                 self.ui.set_auto_login(auto_login == 'true')
-            except debconf.DebconfError:
-                pass
-            try:
-                encrypt_home = self.db.get('user-setup/force-encrypt-home')
-                if not encrypt_home:
-                    encrypt_home = self.db.get('user-setup/encrypt-home')
-                self.ui.set_encrypt_home(encrypt_home == 'true')
-                self.ui.set_force_encrypt_home(encrypt_home == 'true')
             except debconf.DebconfError:
                 pass
         try:
@@ -853,7 +725,7 @@ class Page(plugin.Plugin):
         # We intentionally don't listen to passwd/auto-login or
         # user-setup/encrypt-home because we don't want those alone to force
         # the page to be shown, if they're the only questions not preseeded.
-        questions = ['^passwd/username$',
+        questions = ['^passwd/user-fullname$', '^passwd/username$',
                      '^passwd/user-password$', '^passwd/user-password-again$',
                      'ERROR']
         if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
@@ -880,20 +752,7 @@ class Page(plugin.Plugin):
     def ok_handler(self):
         self.ui.clear_errors()
 
-        # edit by kobe
-        # language
-        # new_language = "zh_CN"
-        # language_question = "localechooser/languagelist"
-        # self.preseed(language_question, new_language)
-        # self.db.reset('debian-installer/country')
-        # timezone
-        # "Asia/Chongqing"
-        # language = self.db.get('localechooser/languagelist')
-        # if language == "zh_CN":
-        #    zone = "Asia/Shanghai"
-        # else: # en
-        #    zone = "America/New_York"
-
+        #kylin add
         zone = "Asia/Shanghai"
         if os.path.isfile("/tmp/kylin_ubiquity_config"):
             import configparser
@@ -913,15 +772,13 @@ class Page(plugin.Plugin):
         # console-setup
         variant = "英语(美国)"
         self.preseed('keyboard-configuration/variant', variant)
+        #kylin end
 
-        #fullname = self.ui.get_fullname()
+        fullname = self.ui.get_fullname()
         username = self.ui.get_username().strip()
-        # set default fullname, prevent mistakes
-        fullname = username
         password = self.ui.get_password()
         password_confirm = self.ui.get_verified_password()
         auto_login = self.ui.get_auto_login()
-        encrypt_home = self.ui.get_encrypt_home()
 
         self.preseed('passwd/user-fullname', fullname)
         self.preseed('passwd/username', username)
@@ -933,7 +790,7 @@ class Page(plugin.Plugin):
         else:
             self.preseed('passwd/user-uid', '')
         self.preseed_bool('passwd/auto-login', auto_login)
-        self.preseed_bool('user-setup/encrypt-home', encrypt_home)
+        self.preseed_bool('user-setup/encrypt-home', False)
 
         hostname = self.ui.get_hostname()
 
@@ -979,7 +836,8 @@ class Install(plugin.InstallPlugin):
             return [],[],{}
 
         if 'UBIQUITY_OEM_USER_CONFIG' in os.environ:
-            # kobe
+            # kylin add
+            # command = ['/usr/lib/ubiquity/user-setup/user-setup-apply']
             command = [
                 'sh', '-c',
                 '/usr/lib/ubiquity/tzsetup/post-base-installer-oem && '
@@ -987,10 +845,12 @@ class Install(plugin.InstallPlugin):
                 '/usr/lib/ubiquity/user-setup/user-setup-apply && '
                 '/usr/share/ubiquity/console-setup-apply',
             ]
-            # command = ['/usr/lib/ubiquity/user-setup/user-setup-apply']
+            # kylin end
             environ = {'OVERRIDE_SYSTEM_USER': '1'}
         else:
-            # kobe
+            # kylin add
+            # command = [
+            #     '/usr/lib/ubiquity/user-setup/user-setup-apply', '/target']
             command = [
                 'sh', '-c',
                 '/usr/lib/ubiquity/user-setup/user-setup-apply /target && '
@@ -998,8 +858,7 @@ class Install(plugin.InstallPlugin):
                 '/usr/share/ubiquity/clock-setup-apply && '
                 '/usr/share/ubiquity/console-setup-apply',
             ]
-            # command = [
-            #     '/usr/lib/ubiquity/user-setup/user-setup-apply', '/target']
+            # kylin end
             environ = {}
             if os.path.exists('/var/lib/ubiquity/encrypted-swap'):
                 environ['OVERRIDE_ALREADY_ENCRYPTED_SWAP'] = '1'
